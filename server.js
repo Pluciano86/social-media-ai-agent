@@ -682,6 +682,37 @@ app.post('/api/auth/logout', requireAuth, async (req, res) => {
   res.json({ success: true, message: 'Logged out successfully' });
 });
 
+// GET /api/auth/me
+app.get('/api/auth/me', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      'SELECT id, username, created_at FROM users WHERE id = $1',
+      [req.user.userId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const user = rows[0];
+    res.json({
+      success: true,
+      user: {
+        id: user.id,
+        username: user.username,
+        createdAt: user.created_at,
+      },
+      token: {
+        issuedAt: new Date(req.user.iat * 1000).toISOString(),
+        expiresAt: new Date(req.user.exp * 1000).toISOString(),
+      },
+    });
+  } catch (err) {
+    log('error', `Error fetching current user: ${err.message}`);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
 // ────────────────────────────────────────────────────────────────────────────
 // All routes defined AFTER this point require a valid JWT
 app.use('/api', requireAuth);
