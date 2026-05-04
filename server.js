@@ -657,6 +657,39 @@ app.post('/api/auth/connect-client', async (req, res) => {
   }
 });
 
+// ── GET /api/auth/pages/:clientId ──────────────────────────────────────────
+app.get('/api/auth/pages/:clientId', async (req, res) => {
+  const clientId = parseInt(req.params.clientId, 10);
+  if (isNaN(clientId)) {
+    return res.status(400).json({ success: false, message: 'clientId must be a number' });
+  }
+
+  try {
+    const { rows } = await db.query(
+      `SELECT id, name, platform, page_id, created_at FROM clients WHERE id = $1`,
+      [clientId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: `No client found with id ${clientId}` });
+    }
+
+    const client = rows[0];
+
+    res.json({
+      success: true,
+      clientId: client.id,
+      clientName: client.name,
+      platform: client.platform,
+      pageId: client.page_id,
+      connectedAt: client.created_at,
+    });
+  } catch (err) {
+    log('error', `Error fetching pages for client ${clientId}: ${err.message}`);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
 // ── GET /api/clients ────────────────────────────────────────────────────────
 app.get('/api/clients', async (req, res) => {
   try {
