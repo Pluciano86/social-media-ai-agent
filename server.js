@@ -745,6 +745,38 @@ app.get('/api/clients', async (req, res) => {
   }
 });
 
+// ── GET /api/clients/:clientId ──────────────────────────────────────────────
+app.get('/api/clients/:clientId', async (req, res) => {
+  const clientId = parseInt(req.params.clientId, 10);
+  if (isNaN(clientId)) {
+    return res.status(400).json({ success: false, message: 'clientId must be a number' });
+  }
+
+  try {
+    const { rows } = await db.query(
+      'SELECT id, name, platform, page_id, created_at FROM clients WHERE id = $1',
+      [clientId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: `No client found with id ${clientId}` });
+    }
+
+    const c = rows[0];
+    res.json({
+      success: true,
+      clientId: c.id,
+      clientName: c.name,
+      platform: c.platform,
+      pageId: c.page_id,
+      connectedAt: c.created_at,
+    });
+  } catch (err) {
+    log('error', `Error fetching client ${clientId}: ${err.message}`);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
 // ── GET /api/comments/:clientId ─────────────────────────────────────────────
 app.get('/api/comments/:clientId', async (req, res) => {
   const clientId = parseInt(req.params.clientId, 10);
