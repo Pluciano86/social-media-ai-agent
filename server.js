@@ -1030,6 +1030,45 @@ app.get('/api/scheduled-posts/:clientId', async (req, res) => {
   }
 });
 
+// ── GET /api/scheduled-posts/:postId ───────────────────────────────────────
+app.get('/api/scheduled-posts/:postId', async (req, res) => {
+  const postId = parseInt(req.params.postId, 10);
+  if (isNaN(postId)) {
+    return res.status(400).json({ success: false, message: 'postId must be a number' });
+  }
+
+  try {
+    const { rows } = await db.query(
+      `SELECT id, client_id, content, image_url, scheduled_time, platforms,
+              status, published_at, error_message, created_at
+       FROM scheduled_posts WHERE id = $1`,
+      [postId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: `No scheduled post found with id ${postId}` });
+    }
+
+    const p = rows[0];
+    res.json({
+      success: true,
+      postId: p.id,
+      clientId: p.client_id,
+      content: p.content,
+      imageUrl: p.image_url,
+      scheduledTime: p.scheduled_time,
+      platforms: p.platforms,
+      status: p.status,
+      publishedAt: p.published_at,
+      errorMessage: p.error_message,
+      createdAt: p.created_at,
+    });
+  } catch (err) {
+    log('error', `Error fetching scheduled post ${postId}: ${err.message}`);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
 // ── PUT /api/scheduled-posts/:postId ───────────────────────────────────────
 app.put('/api/scheduled-posts/:postId', async (req, res) => {
   const postId = parseInt(req.params.postId, 10);
