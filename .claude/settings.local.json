@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "Bash(node -e \"require\\('./server.js'\\)\")",
+      "Bash(git add *)",
+      "Bash(git init *)",
+      "Bash(git commit *)"
+    ]
+  }
+}
