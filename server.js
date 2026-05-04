@@ -713,6 +713,56 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
   }
 });
 
+// PUT /api/auth/change-password
+app.put('/api/auth/change-password', requireAuth, async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+
+  const check = validateRequired(req.body, ['currentPassword', 'newPassword']);
+  if (!check.valid) return res.status(400).json({ success: false, message: check.error });
+
+  if (newPassword.length < 8) {
+    return res.status(400).json({ success: false, message: 'New password must be at least 8 characters' });
+  }
+
+  if (currentPassword === newPassword) {
+    return res.status(400).json({ success: false, message: 'New password must be different from current password' });
+  }
+
+  try {
+    const { rows } = await db.query(
+      'SELECT id, password_hash FROM users WHERE id = $1',
+      [req.user.userId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const valid = await bcrypt.compare(currentPassword, rows[0].password_hash);
+    if (!valid) {
+      return res.status(401).json({ success: false, message: 'Current password is incorrect' });
+    }
+
+    const newHash = await bcrypt.hash(newPassword, 12);
+    await db.query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, req.user.userId]);
+
+    // Blacklist current token — user must log in again with the new password
+    if (req.user.jti) {
+      const expiresAt = new Date(req.user.exp * 1000);
+      await db.query(
+        'INSERT INTO token_blacklist (jti, expires_at) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [req.user.jti, expiresAt]
+      ).catch(err => log('warn', `Could not blacklist token after password change: ${err.message}`));
+    }
+
+    log('info', `Password changed for user: ${req.user.username}`);
+    res.json({ success: true, message: 'Password changed successfully. Please log in again.' });
+  } catch (err) {
+    log('error', `Error changing password: ${err.message}`);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
 // ────────────────────────────────────────────────────────────────────────────
 // All routes defined AFTER this point require a valid JWT
 app.use('/api', requireAuth);
