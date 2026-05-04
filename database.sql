@@ -23,6 +23,18 @@ CREATE TABLE users (
 CREATE INDEX idx_users_username ON users(username);
 
 -- ============================================================
+-- TABLE: token_blacklist
+-- Revoked JWT tokens (logout / refresh rotation)
+-- ============================================================
+CREATE TABLE token_blacklist (
+    jti         VARCHAR(36)     PRIMARY KEY,
+    expires_at  TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX idx_token_blacklist_expires_at ON token_blacklist(expires_at);
+
+-- ============================================================
 -- TABLE: clients
 -- Stores connected social media client accounts
 -- ============================================================

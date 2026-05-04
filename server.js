@@ -512,12 +512,31 @@ cron.schedule('* * * * *', async () => {
   }
 });
 
+// Cron #3: daily at midnight — purge expired blacklisted tokens
+cron.schedule('0 0 * * *', async () => {
+  try {
+    const { rowCount } = await db.query(
+      'DELETE FROM token_blacklist WHERE expires_at < NOW()'
+    );
+    if (rowCount > 0) log('info', `[CRON #3] Purged ${rowCount} expired blacklisted token(s)`);
+  } catch (err) {
+    log('error', `[CRON #3] Blacklist cleanup error: ${err.message}`);
+  }
+});
+
 // ─── ROUTES ──────────────────────────────────────────────────────────────────
 
 // Health Check
+// ─── JWT Helpers ────────────────────────────────────────────────────────────
+
+function signToken(payload) {
+  const jti = require('crypto').randomUUID();
+  return jwt.sign({ ...payload, jti }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
+}
+
 // ─── JWT Middleware ──────────────────────────────────────────────────────────
 
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.startsWith('Bearer ')
     ? authHeader.slice(7)
@@ -527,13 +546,32 @@ function requireAuth(req, res, next) {
     return res.status(401).json({ success: false, message: 'Missing Authorization header. Use: Bearer <token>' });
   }
 
+  let decoded;
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
-    next();
+    decoded = jwt.verify(token, JWT_SECRET);
   } catch (err) {
     const message = err.name === 'TokenExpiredError' ? 'Token expired' : 'Invalid token';
     return res.status(401).json({ success: false, message });
   }
+
+  // Check blacklist (logout)
+  if (decoded.jti) {
+    try {
+      const { rows } = await db.query(
+        'SELECT 1 FROM token_blacklist WHERE jti = $1',
+        [decoded.jti]
+      );
+      if (rows.length > 0) {
+        return res.status(401).json({ success: false, message: 'Token has been revoked. Please log in again.' });
+      }
+    } catch (err) {
+      log('warn', `Blacklist check failed: ${err.message}`);
+    }
+  }
+
+  req.user = decoded;
+  req.token = token;
+  next();
 }
 
 // ─── Auth Routes (public) ────────────────────────────────────────────────────
@@ -557,7 +595,7 @@ app.post('/api/auth/register', async (req, res) => {
       [username.toLowerCase().trim(), hash]
     );
     const user = rows[0];
-    const token = jwt.sign({ userId: user.id, username: user.username }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
+    const token = signToken({ userId: user.id, username: user.username });
 
     log('info', `User registered: ${user.username} (id: ${user.id})`);
     res.status(201).json({
@@ -594,7 +632,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     const user = rows[0];
-    const token = jwt.sign({ userId: user.id, username: user.username }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
+    const token = signToken({ userId: user.id, username: user.username });
 
     log('info', `User logged in: ${user.username}`);
     res.json({
@@ -610,13 +648,38 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 // POST /api/auth/refresh
-app.post('/api/auth/refresh', requireAuth, (req, res) => {
-  const token = jwt.sign(
-    { userId: req.user.userId, username: req.user.username },
-    JWT_SECRET,
-    { expiresIn: JWT_EXPIRES }
-  );
+app.post('/api/auth/refresh', requireAuth, async (req, res) => {
+  // Blacklist the old token before issuing a new one
+  if (req.user.jti) {
+    const expiresAt = new Date(req.user.exp * 1000);
+    try {
+      await db.query(
+        'INSERT INTO token_blacklist (jti, expires_at) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [req.user.jti, expiresAt]
+      );
+    } catch (err) {
+      log('warn', `Could not blacklist old token on refresh: ${err.message}`);
+    }
+  }
+  const token = signToken({ userId: req.user.userId, username: req.user.username });
   res.json({ success: true, token, expiresIn: JWT_EXPIRES });
+});
+
+// POST /api/auth/logout
+app.post('/api/auth/logout', requireAuth, async (req, res) => {
+  if (req.user.jti) {
+    const expiresAt = new Date(req.user.exp * 1000);
+    try {
+      await db.query(
+        'INSERT INTO token_blacklist (jti, expires_at) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [req.user.jti, expiresAt]
+      );
+    } catch (err) {
+      log('warn', `Could not blacklist token on logout: ${err.message}`);
+    }
+  }
+  log('info', `User logged out: ${req.user.username}`);
+  res.json({ success: true, message: 'Logged out successfully' });
 });
 
 // ────────────────────────────────────────────────────────────────────────────
