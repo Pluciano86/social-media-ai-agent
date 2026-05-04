@@ -728,10 +728,20 @@ app.get('/api/clients', async (req, res) => {
     const { rows } = await db.query(
       'SELECT id, name, platform, page_id, created_at FROM clients ORDER BY created_at DESC'
     );
-    res.json({ clients: rows, total: rows.length });
+    res.json({
+      success: true,
+      total: rows.length,
+      clients: rows.map(c => ({
+        clientId: c.id,
+        clientName: c.name,
+        platform: c.platform,
+        pageId: c.page_id,
+        connectedAt: c.created_at,
+      })),
+    });
   } catch (err) {
     log('error', `Error fetching clients: ${err.message}`);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
 
