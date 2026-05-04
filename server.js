@@ -1030,6 +1030,90 @@ app.get('/api/scheduled-posts/:clientId', async (req, res) => {
   }
 });
 
+// ── PUT /api/scheduled-posts/:postId ───────────────────────────────────────
+app.put('/api/scheduled-posts/:postId', async (req, res) => {
+  const postId = parseInt(req.params.postId, 10);
+  if (isNaN(postId)) {
+    return res.status(400).json({ success: false, message: 'postId must be a number' });
+  }
+
+  const { content, imageUrl, scheduledTime, platforms } = req.body;
+
+  if (!content && !imageUrl && !scheduledTime && !platforms) {
+    return res.status(400).json({ success: false, message: 'Provide at least one field to update: content, imageUrl, scheduledTime, or platforms' });
+  }
+
+  if (platforms !== undefined) {
+    if (!Array.isArray(platforms) || platforms.length === 0) {
+      return res.status(400).json({ success: false, message: 'platforms must be a non-empty array' });
+    }
+    const validPlatforms = ['facebook', 'instagram'];
+    const invalid = platforms.filter(p => !validPlatforms.includes(p));
+    if (invalid.length > 0) {
+      return res.status(400).json({ success: false, message: `Invalid platforms: ${invalid.join(', ')}. Must be facebook or instagram` });
+    }
+  }
+
+  if (scheduledTime && isNaN(Date.parse(scheduledTime))) {
+    return res.status(400).json({ success: false, message: 'scheduledTime must be a valid ISO 8601 date' });
+  }
+
+  if (scheduledTime && new Date(scheduledTime) <= new Date()) {
+    return res.status(400).json({ success: false, message: 'scheduledTime must be in the future' });
+  }
+
+  try {
+    const { rows: existing } = await db.query(
+      'SELECT id, status FROM scheduled_posts WHERE id = $1',
+      [postId]
+    );
+
+    if (existing.length === 0) {
+      return res.status(404).json({ success: false, message: `No scheduled post found with id ${postId}` });
+    }
+
+    if (existing[0].status !== 'pending') {
+      return res.status(409).json({
+        success: false,
+        message: `Post cannot be edited because its status is "${existing[0].status}". Only pending posts can be edited.`,
+      });
+    }
+
+    const fields = [];
+    const values = [];
+    let idx = 1;
+
+    if (content)       { fields.push(`content = $${idx++}`);        values.push(content); }
+    if (imageUrl)      { fields.push(`image_url = $${idx++}`);      values.push(imageUrl); }
+    if (scheduledTime) { fields.push(`scheduled_time = $${idx++}`); values.push(scheduledTime); }
+    if (platforms)     { fields.push(`platforms = $${idx++}`);      values.push(platforms); }
+    values.push(postId);
+
+    const { rows } = await db.query(
+      `UPDATE scheduled_posts SET ${fields.join(', ')} WHERE id = $${idx}
+       RETURNING id, content, image_url, scheduled_time, platforms, status, created_at`,
+      values
+    );
+
+    const p = rows[0];
+    log('info', `Scheduled post updated: id ${p.id}`);
+    res.json({
+      success: true,
+      message: 'Scheduled post updated successfully',
+      postId: p.id,
+      content: p.content,
+      imageUrl: p.image_url,
+      scheduledTime: p.scheduled_time,
+      platforms: p.platforms,
+      status: p.status,
+      createdAt: p.created_at,
+    });
+  } catch (err) {
+    log('error', `Error updating scheduled post ${postId}: ${err.message}`);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
 // ── DELETE /api/scheduled-posts/:postId ────────────────────────────────────
 app.delete('/api/scheduled-posts/:postId', async (req, res) => {
   const postId = parseInt(req.params.postId, 10);
