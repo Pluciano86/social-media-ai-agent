@@ -804,10 +804,66 @@ app.delete('/api/auth/delete-account', requireAuth, async (req, res) => {
   }
 });
 
-// ────────────────────────────────────────────────────────────────────────────
-// All routes defined AFTER this point require a valid JWT
-app.use('/api', requireAuth);
-// ────────────────────────────────────────────────────────────────────────────
+// ── GET /api/ping ─────────────────────────────────────────────────────────
+// Simple health check — no DB, no JWT
+app.get('/api/ping', (req, res) => {
+  res.json({ success: true, status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// ── GET /api/analyze-performance-public/:clientId ─────────────────────────
+// Public mirror of GET /api/analyze-performance/:clientId (no JWT required)
+app.get('/api/analyze-performance-public/:clientId', async (req, res) => {
+  const clientId = parseInt(req.params.clientId, 10);
+  if (isNaN(clientId)) {
+    return res.status(400).json({ success: false, message: 'clientId must be a number' });
+  }
+
+  try {
+    const { rows: clientRows } = await db.query(
+      'SELECT id, name, platform FROM clients WHERE id = $1',
+      [clientId]
+    );
+    if (clientRows.length === 0) {
+      return res.status(404).json({ success: false, message: `No client found with id ${clientId}` });
+    }
+
+    const { rows } = await db.query(
+      `SELECT id, analysis_date, report_json, key_insights, recommendations, created_at
+       FROM performance_analyses
+       WHERE client_id = $1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [clientId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `No performance analysis found for client ${clientId}. Run POST /api/analyze-performance first.`,
+      });
+    }
+
+    const a = rows[0];
+    const report = a.report_json;
+
+    res.json({
+      success: true,
+      clientId,
+      clientName: clientRows[0].name,
+      platform: clientRows[0].platform,
+      analysisId: a.id,
+      analysisDate: a.analysis_date,
+      aggregateStats: report.aggregateStats || null,
+      analysis: report,
+      recommendations: a.recommendations,
+      keyInsights: a.key_insights,
+      createdAt: a.created_at,
+    });
+  } catch (err) {
+    log('error', `[PUBLIC] Error fetching performance analysis for client ${clientId}: ${err.message}`);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
 
 app.get('/health', (req, res) => res.redirect(301, '/api/health'));
 
@@ -834,50 +890,6 @@ app.get('/api/health', async (req, res) => {
       database: { status: dbStatus, latencyMs: dbLatencyMs },
     },
   });
-});
-
-// ── POST /api/auth/list-pages ───────────────────────────────────────────────
-// Returns all Facebook Pages the user token has access to, so the caller
-// can present a selection UI before calling /connect-client.
-app.post('/api/auth/list-pages', async (req, res) => {
-  const { userAccessToken } = req.body;
-
-  const check = validateRequired(req.body, ['userAccessToken']);
-  if (!check.valid) return res.status(400).json({ success: false, message: check.error });
-
-  try {
-    const { data } = await axios.get(`${META_BASE_URL}/me`, {
-      params: {
-        access_token: userAccessToken,
-        fields: 'id,name,accounts.fields(id,name,category,followers_count)',
-      },
-      timeout: 10000,
-    });
-
-    const pages = (data.accounts && data.accounts.data) || [];
-
-    if (pages.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'No Facebook Pages found. Make sure the token has pages_show_list permission.',
-      });
-    }
-
-    res.json({
-      success: true,
-      total: pages.length,
-      pages: pages.map(p => ({
-        pageId: p.id,
-        pageName: p.name,
-        category: p.category || null,
-        followers: p.followers_count || null,
-      })),
-    });
-  } catch (err) {
-    const metaMsg = err.response?.data?.error?.message || err.message;
-    log('warn', `list-pages failed: ${metaMsg}`);
-    res.status(401).json({ success: false, message: `Invalid user access token: ${metaMsg}` });
-  }
 });
 
 // ── POST /api/auth/connect-client ──────────────────────────────────────────
@@ -970,6 +982,55 @@ app.post('/api/auth/connect-client', async (req, res) => {
   } catch (err) {
     log('error', `Error connecting client: ${err.message}`);
     res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// All routes defined AFTER this point require a valid JWT
+app.use('/api', requireAuth);
+// ────────────────────────────────────────────────────────────────────────────
+
+// ── POST /api/auth/list-pages ───────────────────────────────────────────────
+// Returns all Facebook Pages the user token has access to, so the caller
+// can present a selection UI before calling /connect-client.
+app.post('/api/auth/list-pages', async (req, res) => {
+  const { userAccessToken } = req.body;
+
+  const check = validateRequired(req.body, ['userAccessToken']);
+  if (!check.valid) return res.status(400).json({ success: false, message: check.error });
+
+  try {
+    const { data } = await axios.get(`${META_BASE_URL}/me`, {
+      params: {
+        access_token: userAccessToken,
+        fields: 'id,name,accounts.fields(id,name,category,followers_count)',
+      },
+      timeout: 10000,
+    });
+
+    const pages = (data.accounts && data.accounts.data) || [];
+
+    if (pages.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'No Facebook Pages found. Make sure the token has pages_show_list permission.',
+      });
+    }
+
+    res.json({
+      success: true,
+      total: pages.length,
+      pages: pages.map(p => ({
+        pageId: p.id,
+        pageName: p.name,
+        category: p.category || null,
+        followers: p.followers_count || null,
+      })),
+    });
+  } catch (err) {
+    const metaMsg = err.response?.data?.error?.message || err.message;
+    log('warn', `list-pages failed: ${metaMsg}`);
+    res.status(401).json({ success: false, message: `Invalid user access token: ${metaMsg}` });
   }
 });
 
