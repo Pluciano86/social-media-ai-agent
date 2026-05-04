@@ -690,6 +690,38 @@ app.get('/api/auth/pages/:clientId', async (req, res) => {
   }
 });
 
+// ── DELETE /api/auth/disconnect/:clientId ──────────────────────────────────
+app.delete('/api/auth/disconnect/:clientId', async (req, res) => {
+  const clientId = parseInt(req.params.clientId, 10);
+  if (isNaN(clientId)) {
+    return res.status(400).json({ success: false, message: 'clientId must be a number' });
+  }
+
+  try {
+    const { rows } = await db.query(
+      `DELETE FROM clients WHERE id = $1 RETURNING id, name, page_id`,
+      [clientId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: `No client found with id ${clientId}` });
+    }
+
+    const client = rows[0];
+    log('info', `Client disconnected: ${client.name} (id: ${client.id}, pageId: ${client.page_id})`);
+
+    res.json({
+      success: true,
+      message: `Client "${client.name}" disconnected successfully`,
+      clientId: client.id,
+      pageId: client.page_id,
+    });
+  } catch (err) {
+    log('error', `Error disconnecting client ${clientId}: ${err.message}`);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
 // ── GET /api/clients ────────────────────────────────────────────────────────
 app.get('/api/clients', async (req, res) => {
   try {
