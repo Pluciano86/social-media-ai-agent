@@ -522,9 +522,9 @@ app.get('/health', (req, res) => {
 
 // ── POST /api/auth/connect-client ──────────────────────────────────────────
 app.post('/api/auth/connect-client', async (req, res) => {
-  const { clientName, platformType, accessToken, pageId } = req.body;
+  const { clientName, platformType, userAccessToken } = req.body;
 
-  const check = validateRequired(req.body, ['clientName', 'platformType', 'accessToken', 'pageId']);
+  const check = validateRequired(req.body, ['clientName', 'platformType', 'userAccessToken']);
   if (!check.valid) return res.status(400).json({ success: false, message: check.error });
 
   const validPlatforms = ['facebook', 'instagram', 'both'];
@@ -532,38 +532,55 @@ app.post('/api/auth/connect-client', async (req, res) => {
     return res.status(400).json({ success: false, message: `platformType must be one of: ${validPlatforms.join(', ')}` });
   }
 
-  log('info', `Connecting client: ${clientName} | platform: ${platformType} | token: ${sanitizeToken(accessToken)}`);
+  log('info', `Connecting client: ${clientName} | platform: ${platformType} | userToken: ${sanitizeToken(userAccessToken)}`);
 
   try {
-    // Verify the token works by fetching the page
+    // Step 1: validate user token and retrieve managed pages + their page access tokens
+    let accounts;
     try {
-      await axios.get(`${META_BASE_URL}/${pageId}`, {
-        params: { access_token: accessToken, fields: 'id,name' },
+      const { data } = await axios.get(`${META_BASE_URL}/me`, {
+        params: {
+          access_token: userAccessToken,
+          fields: 'accounts.fields(id,name,access_token)',
+        },
         timeout: 10000,
       });
+      accounts = data.accounts && data.accounts.data;
     } catch (err) {
-      log('warn', `Token validation failed for ${clientName}: ${err.message}`);
-      return res.status(401).json({ success: false, message: 'Invalid access token or page ID' });
+      const metaMsg = err.response?.data?.error?.message || err.message;
+      log('warn', `User token validation failed for ${clientName}: ${metaMsg}`);
+      return res.status(401).json({ success: false, message: `Invalid user access token: ${metaMsg}` });
     }
 
+    if (!accounts || accounts.length === 0) {
+      return res.status(404).json({ success: false, message: 'No Facebook Pages found for this user token. Make sure the token has pages_show_list permission.' });
+    }
+
+    // Step 2: use the first page found (or the only one)
+    // If the caller wants a specific page they can extend this later
+    const page = accounts[0];
+    const pageId = page.id;
+    const pageAccessToken = page.access_token;
+
+    log('info', `Page resolved: ${page.name} (${pageId}) | pageToken: ${sanitizeToken(pageAccessToken)}`);
+
+    // Step 3: persist to DB
     const { rows } = await db.query(
       `INSERT INTO clients (name, platform, page_id, access_token)
        VALUES ($1, $2, $3, $4)
-       ON CONFLICT DO NOTHING
        RETURNING id, name, platform, page_id, created_at`,
-      [clientName, platformType, pageId, accessToken]
+      [clientName, platformType, pageId, pageAccessToken]
     );
 
     const client = rows[0];
-    if (!client) {
-      return res.status(409).json({ success: false, message: 'Client already exists or conflict occurred' });
-    }
 
     log('info', `Client connected successfully: ${clientName} (id: ${client.id})`);
     res.status(201).json({
       success: true,
       message: 'Client connected successfully',
-      client: { id: client.id, name: client.name, platform: client.platform, pageId: client.page_id, createdAt: client.created_at },
+      clientId: client.id,
+      clientName: client.name,
+      pageId: client.page_id,
     });
   } catch (err) {
     log('error', `Error connecting client: ${err.message}`);
