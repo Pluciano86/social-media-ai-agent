@@ -190,6 +190,153 @@ Si no puedes responder directamente, ofrece redirigir al cliente.`;
   return response.content.find(b => b.type === 'text')?.text?.trim() || '';
 }
 
+// ─── Meta API Helper: posts de los últimos N días con métricas ───────────────
+
+async function fetchPostsWithMetrics(pageId, accessToken, daysBack = 60) {
+  const since = Math.floor((Date.now() - daysBack * 24 * 60 * 60 * 1000) / 1000);
+  const url = `${META_BASE_URL}/${pageId}/posts`;
+
+  const response = await axios.get(url, {
+    params: {
+      access_token: accessToken,
+      fields: 'id,message,story,full_picture,attachments{media_type},created_time',
+      since,
+      limit: 100,
+    },
+    timeout: 15000,
+  });
+
+  const posts = response.data.data || [];
+
+  // Fetch engagement metrics for each post in parallel (batched to avoid throttling)
+  const enriched = [];
+  const BATCH = 10;
+
+  for (let i = 0; i < posts.length; i += BATCH) {
+    const batch = posts.slice(i, i + BATCH);
+    const results = await Promise.allSettled(
+      batch.map(async (post) => {
+        let metrics = { likes: 0, comments: 0, shares: 0, reach: 0, impressions: 0 };
+        try {
+          const r = await axios.get(`${META_BASE_URL}/${post.id}`, {
+            params: {
+              access_token: accessToken,
+              fields: [
+                'likes.summary(true)',
+                'comments.summary(true)',
+                'shares',
+                'insights.metric(post_impressions,post_impressions_unique)',
+              ].join(','),
+            },
+            timeout: 10000,
+          });
+          const d = r.data;
+          metrics.likes       = d.likes?.summary?.total_count    || 0;
+          metrics.comments    = d.comments?.summary?.total_count || 0;
+          metrics.shares      = d.shares?.count                  || 0;
+          const insightsData  = d.insights?.data || [];
+          for (const ins of insightsData) {
+            const val = ins.values?.[0]?.value || 0;
+            if (ins.name === 'post_impressions')        metrics.impressions = val;
+            if (ins.name === 'post_impressions_unique') metrics.reach       = val;
+          }
+        } catch { /* best-effort — keep zeros */ }
+
+        // Detect content type from attachments
+        const mediaType = post.attachments?.data?.[0]?.media_type || 'text';
+        const contentType = mediaType.includes('video') ? 'video'
+          : mediaType.includes('photo') ? 'photo'
+          : post.full_picture ? 'photo'
+          : 'text';
+
+        const engagementRate = metrics.reach > 0
+          ? ((metrics.likes + metrics.comments + metrics.shares) / metrics.reach * 100).toFixed(2)
+          : '0.00';
+
+        return {
+          postId:         post.id,
+          message:        post.message || post.story || '',
+          contentType,
+          createdTime:    post.created_time,
+          hour:           new Date(post.created_time).getHours(),
+          dayOfWeek:      new Date(post.created_time).toLocaleDateString('es-ES', { weekday: 'long' }),
+          ...metrics,
+          engagementRate: parseFloat(engagementRate),
+        };
+      })
+    );
+
+    results.forEach((r, idx) => {
+      if (r.status === 'fulfilled') enriched.push(r.value);
+      else log('warn', `Could not enrich post ${batch[idx]?.id}: ${r.reason?.message}`);
+    });
+  }
+
+  return enriched;
+}
+
+// ─── Claude AI Helper: análisis de performance completo ──────────────────────
+
+async function generatePerformanceReport(clientName, postsData, period) {
+  const systemPrompt = `Eres un experto consultor de marketing digital y social media analytics con 10 años de experiencia.
+Tu misión es analizar datos de performance de redes sociales y generar reportes profesionales, estratégicos y altamente accionables.
+Responde siempre en español. Sé específico, usa los datos reales proporcionados, y da recomendaciones concretas con ejemplos.`;
+
+  const userPrompt = `Analiza el performance de redes sociales de "${clientName}" para los últimos ${period} días.
+
+DATOS DE POSTS (${postsData.length} posts totales):
+${JSON.stringify(postsData, null, 2)}
+
+Genera un reporte COMPLETO y PROFESIONAL con las siguientes secciones:
+
+1. **RESUMEN EJECUTIVO** - KPIs principales y conclusión en 3-4 oraciones
+2. **ANÁLISIS POR TIPO DE CONTENIDO** - Comparativa entre video, foto y texto (engagement promedio, alcance, mejor tipo)
+3. **HORARIOS ÓPTIMOS DE PUBLICACIÓN** - Basado en los datos, qué horas y días generan más engagement
+4. **TASAS DE ENGAGEMENT** - Análisis detallado, benchmark y comparativas
+5. **TOP 3 POSTS CON MEJOR RENDIMIENTO** - Con postId, razón del éxito y lecciones aprendidas
+6. **BOTTOM 3 POSTS CON PEOR RENDIMIENTO** - Con postId, razón del bajo rendimiento y cómo mejorarlos
+7. **RECOMENDACIONES ESPECÍFICAS PARA MEJORAR ALCANCE** - Mínimo 5 tácticas concretas y aplicables
+8. **ESTRATEGIA DE CONTENIDO PARA PRÓXIMOS 30 DÍAS** - Plan semanal con tipos de contenido, temas y frecuencia
+9. **ANÁLISIS DE TENDENCIAS** - Qué tipo de contenido está funcionando actualmente en la industria
+10. **TIPS PARA CAMPAÑAS EXITOSAS** - 5 tips accionables específicos para este cliente
+
+Responde en formato JSON con esta estructura exacta:
+{
+  "resumenEjecutivo": "...",
+  "analisisPorTipoContenido": { "video": {...}, "foto": {...}, "texto": {...}, "conclusion": "..." },
+  "horariosOptimos": { "mejoresHoras": [...], "mejoresDias": [...], "analisis": "..." },
+  "tasasEngagement": { "promedioGeneral": "...", "porTipo": {...}, "benchmark": "...", "analisis": "..." },
+  "topPosts": [{ "postId": "...", "mensaje": "...", "metricas": {...}, "razonExito": "...", "leccion": "..." }],
+  "bottomPosts": [{ "postId": "...", "mensaje": "...", "metricas": {...}, "razonBajoRendimiento": "...", "mejora": "..." }],
+  "recomendacionesAlcance": ["...", "...", "...", "...", "..."],
+  "estrategiaContenido30Dias": { "semana1": "...", "semana2": "...", "semana3": "...", "semana4": "...", "frecuenciaRecomendada": "..." },
+  "tendencias": "...",
+  "tipsExito": ["...", "...", "...", "...", "..."],
+  "keyInsights": ["...", "...", "..."]
+}`;
+
+  const response = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 4096,
+    thinking: { type: 'adaptive' },
+    system: systemPrompt,
+    messages: [{ role: 'user', content: userPrompt }],
+  });
+
+  const text = response.content.find(b => b.type === 'text')?.text?.trim() || '{}';
+
+  // Extract JSON from possible markdown fences
+  const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, text];
+  const jsonStr = jsonMatch[1].trim();
+
+  try {
+    return JSON.parse(jsonStr);
+  } catch {
+    // Return as-is in a wrapper if JSON parsing fails
+    return { rawReport: text, parseError: true };
+  }
+}
+
 async function generateAnalyticsRecommendations(analyticsData) {
   const systemPrompt = `Eres un experto en marketing digital y redes sociales.
 Analiza los datos de analytics proporcionados y genera recomendaciones estratégicas concretas,
@@ -756,6 +903,118 @@ app.get('/api/response-history/:clientId', async (req, res) => {
   } catch (err) {
     log('error', `Error fetching response history for client ${clientId}: ${err.message}`);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── POST /api/analyze-performance ───────────────────────────────────────────
+app.post('/api/analyze-performance', async (req, res) => {
+  const { clientId } = req.body;
+
+  if (!clientId) return res.status(400).json({ success: false, message: 'clientId is required' });
+
+  const parsedClientId = parseInt(clientId, 10);
+  if (isNaN(parsedClientId)) return res.status(400).json({ success: false, message: 'clientId must be a number' });
+
+  log('info', `[ANALYZE] Starting performance analysis for client ${parsedClientId}`);
+
+  try {
+    // Fetch client
+    const { rows: clientRows } = await db.query(
+      'SELECT id, name, platform, page_id, access_token FROM clients WHERE id = $1',
+      [parsedClientId]
+    );
+    if (!clientRows.length) return res.status(404).json({ success: false, message: 'Client not found' });
+
+    const client = clientRows[0];
+    const DAYS_BACK = 60;
+
+    // Fetch posts + metrics from Meta API
+    log('info', `[ANALYZE] Fetching posts from last ${DAYS_BACK} days for ${client.name}...`);
+    let postsData = [];
+
+    try {
+      postsData = await fetchPostsWithMetrics(client.page_id, client.access_token, DAYS_BACK);
+      log('info', `[ANALYZE] Retrieved ${postsData.length} posts with metrics`);
+    } catch (err) {
+      log('warn', `[ANALYZE] Meta API error: ${err.message}. Falling back to DB data.`);
+
+      // Fallback: use stored analytics from DB
+      const { rows: dbPosts } = await db.query(
+        `SELECT post_id AS "postId", content AS message, likes, comments, shares, reach,
+                0 AS impressions, 'unknown' AS "contentType", created_at AS "createdTime",
+                EXTRACT(HOUR FROM created_at)::int AS hour,
+                TO_CHAR(created_at, 'Day') AS "dayOfWeek",
+                CASE WHEN reach > 0 THEN
+                  ROUND(((likes + comments + shares)::numeric / reach * 100), 2)
+                ELSE 0 END AS "engagementRate"
+         FROM posts_analytics WHERE client_id = $1
+         ORDER BY created_at DESC LIMIT 100`,
+        [parsedClientId]
+      );
+      postsData = dbPosts;
+    }
+
+    if (!postsData.length) {
+      return res.status(422).json({
+        success: false,
+        message: 'No posts found for this client in the last 60 days. Publish some content first.',
+      });
+    }
+
+    // Compute aggregate statistics to include in the response
+    const totalPosts     = postsData.length;
+    const totalLikes     = postsData.reduce((s, p) => s + (p.likes     || 0), 0);
+    const totalComments  = postsData.reduce((s, p) => s + (p.comments  || 0), 0);
+    const totalShares    = postsData.reduce((s, p) => s + (p.shares    || 0), 0);
+    const totalReach     = postsData.reduce((s, p) => s + (p.reach     || 0), 0);
+    const totalImpressions = postsData.reduce((s, p) => s + (p.impressions || 0), 0);
+    const avgEngagement  = postsData.length
+      ? (postsData.reduce((s, p) => s + (p.engagementRate || 0), 0) / postsData.length).toFixed(2)
+      : '0.00';
+
+    const aggregateStats = {
+      totalPosts, totalLikes, totalComments, totalShares,
+      totalReach, totalImpressions, avgEngagementRate: parseFloat(avgEngagement),
+      period: `${DAYS_BACK} días`,
+      analysisDate: new Date().toISOString(),
+    };
+
+    // Generate AI report
+    log('info', `[ANALYZE] Generating Claude AI report for ${client.name}...`);
+    const reportJson = await generatePerformanceReport(client.name, postsData, DAYS_BACK);
+
+    // Extract key insights and recommendations for easy access
+    const keyInsights    = reportJson.keyInsights    || [];
+    const recommendations = reportJson.recomendacionesAlcance || [];
+
+    // Persist analysis in DB
+    await db.query(
+      `INSERT INTO performance_analyses
+         (client_id, analysis_date, report_json, key_insights, recommendations)
+       VALUES ($1, NOW(), $2, $3, $4)`,
+      [
+        parsedClientId,
+        JSON.stringify({ aggregateStats, ...reportJson }),
+        JSON.stringify(keyInsights),
+        JSON.stringify(recommendations),
+      ]
+    );
+
+    log('info', `[ANALYZE] ✅ Analysis complete for ${client.name}`);
+
+    res.json({
+      success:         true,
+      clientId:        parsedClientId,
+      clientName:      client.name,
+      analysisDate:    new Date().toISOString(),
+      aggregateStats,
+      analysis:        reportJson,
+      recommendations,
+      keyInsights,
+    });
+  } catch (err) {
+    log('error', `[ANALYZE] Error for client ${parsedClientId}: ${err.message}`);
+    res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
 

@@ -85,3 +85,20 @@ CREATE TABLE posts_analytics (
 CREATE INDEX idx_posts_analytics_client_id ON posts_analytics(client_id);
 CREATE INDEX idx_posts_analytics_post_id   ON posts_analytics(post_id);
 CREATE INDEX idx_posts_analytics_created_at ON posts_analytics(created_at DESC);
+
+-- ============================================================
+-- TABLE: performance_analyses
+-- AI-generated performance reports for client accounts
+-- ============================================================
+CREATE TABLE performance_analyses (
+    id               SERIAL PRIMARY KEY,
+    client_id        INTEGER         NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    analysis_date    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    report_json      JSONB           NOT NULL,
+    key_insights     JSONB,
+    recommendations  JSONB,
+    created_at       TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX idx_performance_analyses_client_id    ON performance_analyses(client_id);
+CREATE INDEX idx_performance_analyses_created_at   ON performance_analyses(created_at DESC);
