@@ -6,6 +6,21 @@ DROP TABLE IF EXISTS posts_analytics CASCADE;
 DROP TABLE IF EXISTS comment_responses CASCADE;
 DROP TABLE IF EXISTS scheduled_posts CASCADE;
 DROP TABLE IF EXISTS clients CASCADE;
+DROP TABLE IF EXISTS performance_analyses CASCADE;
+DROP TABLE IF EXISTS users CASCADE;
+
+-- ============================================================
+-- TABLE: users
+-- Application users for JWT authentication
+-- ============================================================
+CREATE TABLE users (
+    id              SERIAL PRIMARY KEY,
+    username        VARCHAR(100)    NOT NULL UNIQUE,
+    password_hash   TEXT            NOT NULL,
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX idx_users_username ON users(username);
 
 -- ============================================================
 -- TABLE: clients

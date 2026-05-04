@@ -9,12 +9,16 @@ const { Pool }   = require('pg');
 const Anthropic  = require('@anthropic-ai/sdk');
 const axios      = require('axios');
 const rateLimit  = require('express-rate-limit');
+const jwt        = require('jsonwebtoken');
+const bcrypt     = require('bcryptjs');
 
 // ─── Configuration ─────────────────────────────────────────────────────────
 
 const PORT          = process.env.PORT        || 3000;
 const META_API_VER  = 'v18.0';
 const META_BASE_URL = `https://graph.facebook.com/${META_API_VER}`;
+const JWT_SECRET    = process.env.JWT_SECRET  || 'change-this-in-production';
+const JWT_EXPIRES   = '24h';
 
 // ─── Logging ────────────────────────────────────────────────────────────────
 
@@ -511,6 +515,115 @@ cron.schedule('* * * * *', async () => {
 // ─── ROUTES ──────────────────────────────────────────────────────────────────
 
 // Health Check
+// ─── JWT Middleware ──────────────────────────────────────────────────────────
+
+function requireAuth(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.startsWith('Bearer ')
+    ? authHeader.slice(7)
+    : null;
+
+  if (!token) {
+    return res.status(401).json({ success: false, message: 'Missing Authorization header. Use: Bearer <token>' });
+  }
+
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch (err) {
+    const message = err.name === 'TokenExpiredError' ? 'Token expired' : 'Invalid token';
+    return res.status(401).json({ success: false, message });
+  }
+}
+
+// ─── Auth Routes (public) ────────────────────────────────────────────────────
+
+// POST /api/auth/register
+app.post('/api/auth/register', async (req, res) => {
+  const { username, password } = req.body;
+
+  const check = validateRequired(req.body, ['username', 'password']);
+  if (!check.valid) return res.status(400).json({ success: false, message: check.error });
+
+  if (password.length < 8) {
+    return res.status(400).json({ success: false, message: 'Password must be at least 8 characters' });
+  }
+
+  try {
+    const hash = await bcrypt.hash(password, 12);
+    const { rows } = await db.query(
+      `INSERT INTO users (username, password_hash) VALUES ($1, $2)
+       RETURNING id, username, created_at`,
+      [username.toLowerCase().trim(), hash]
+    );
+    const user = rows[0];
+    const token = jwt.sign({ userId: user.id, username: user.username }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
+
+    log('info', `User registered: ${user.username} (id: ${user.id})`);
+    res.status(201).json({
+      success: true,
+      message: 'User registered successfully',
+      token,
+      expiresIn: JWT_EXPIRES,
+      user: { id: user.id, username: user.username, createdAt: user.created_at },
+    });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ success: false, message: 'Username already taken' });
+    }
+    log('error', `Register error: ${err.message}`);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// POST /api/auth/login
+app.post('/api/auth/login', async (req, res) => {
+  const { username, password } = req.body;
+
+  const check = validateRequired(req.body, ['username', 'password']);
+  if (!check.valid) return res.status(400).json({ success: false, message: check.error });
+
+  try {
+    const { rows } = await db.query(
+      'SELECT id, username, password_hash FROM users WHERE username = $1',
+      [username.toLowerCase().trim()]
+    );
+
+    if (rows.length === 0 || !(await bcrypt.compare(password, rows[0].password_hash))) {
+      return res.status(401).json({ success: false, message: 'Invalid username or password' });
+    }
+
+    const user = rows[0];
+    const token = jwt.sign({ userId: user.id, username: user.username }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
+
+    log('info', `User logged in: ${user.username}`);
+    res.json({
+      success: true,
+      token,
+      expiresIn: JWT_EXPIRES,
+      user: { id: user.id, username: user.username },
+    });
+  } catch (err) {
+    log('error', `Login error: ${err.message}`);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// POST /api/auth/refresh
+app.post('/api/auth/refresh', requireAuth, (req, res) => {
+  const token = jwt.sign(
+    { userId: req.user.userId, username: req.user.username },
+    JWT_SECRET,
+    { expiresIn: JWT_EXPIRES }
+  );
+  res.json({ success: true, token, expiresIn: JWT_EXPIRES });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// All routes defined AFTER this point require a valid JWT
+app.use('/api', requireAuth);
+// ────────────────────────────────────────────────────────────────────────────
+
 app.get('/health', (req, res) => res.redirect(301, '/api/health'));
 
 app.get('/api/health', async (req, res) => {
