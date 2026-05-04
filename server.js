@@ -1196,81 +1196,105 @@ app.delete('/api/scheduled-posts/:postId', async (req, res) => {
 // ── GET /api/analytics/:clientId ────────────────────────────────────────────
 app.get('/api/analytics/:clientId', async (req, res) => {
   const clientId = parseInt(req.params.clientId, 10);
-  if (isNaN(clientId)) return res.status(400).json({ error: 'Invalid clientId' });
+  if (isNaN(clientId)) {
+    return res.status(400).json({ success: false, message: 'clientId must be a number' });
+  }
 
   try {
     const { rows: clientRows } = await db.query(
       'SELECT id, name, platform, page_id, access_token FROM clients WHERE id = $1',
       [clientId]
     );
-    if (!clientRows.length) return res.status(404).json({ error: 'Client not found' });
+    if (clientRows.length === 0) {
+      return res.status(404).json({ success: false, message: `No client found with id ${clientId}` });
+    }
 
     const client = clientRows[0];
-    let metaData = [];
+    let posts = [];
+    let source = 'meta';
 
     try {
-      const posts = await fetchPagePosts(client.page_id, client.access_token, 10);
+      const rawPosts = await fetchPagePosts(client.page_id, client.access_token, 10);
 
-      for (const post of posts) {
+      for (const post of rawPosts) {
         let insights = { likes: 0, comments: 0, shares: 0, reach: 0 };
         try {
-          const insightsRes = await axios.get(`${META_BASE_URL}/${post.id}`, {
+          const { data: d } = await axios.get(`${META_BASE_URL}/${post.id}`, {
             params: {
               access_token: client.access_token,
               fields: 'likes.summary(true),comments.summary(true),shares,insights.metric(post_impressions_unique)',
             },
             timeout: 10000,
           });
-          const d = insightsRes.data;
           insights = {
-            likes:    d.likes?.summary?.total_count    || 0,
-            comments: d.comments?.summary?.total_count || 0,
-            shares:   d.shares?.count                  || 0,
+            likes:    d.likes?.summary?.total_count             || 0,
+            comments: d.comments?.summary?.total_count          || 0,
+            shares:   d.shares?.count                           || 0,
             reach:    d.insights?.data?.[0]?.values?.[0]?.value || 0,
           };
-        } catch {
-          // Insights may not be available for all posts; continue with zeros
-        }
+        } catch { /* insights unavailable for this post */ }
 
-        // Upsert analytics snapshot
         await db.query(
           `INSERT INTO posts_analytics (client_id, post_id, content, likes, comments, shares, reach)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           ON CONFLICT DO NOTHING`,
+           VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING`,
           [clientId, post.id, post.message || '', insights.likes, insights.comments, insights.shares, insights.reach]
         );
 
-        metaData.push({ postId: post.id, content: post.message || '', createdTime: post.created_time, ...insights });
+        posts.push({ postId: post.id, content: post.message || '', createdTime: post.created_time, ...insights });
       }
     } catch (err) {
-      log('warn', `Error fetching Meta analytics for client ${clientId}: ${err.message}`);
+      log('warn', `Meta analytics unavailable for client ${clientId}, falling back to DB: ${err.message}`);
     }
 
-    // Fallback to DB data if Meta API returned nothing
-    if (!metaData.length) {
+    if (posts.length === 0) {
+      source = 'database';
       const { rows: dbData } = await db.query(
         `SELECT post_id, content, likes, comments, shares, reach, created_at
          FROM posts_analytics WHERE client_id = $1
          ORDER BY created_at DESC LIMIT 20`,
         [clientId]
       );
-      metaData = dbData.map(r => ({
-        postId: r.post_id, content: r.content,
-        likes: r.likes, comments: r.comments, shares: r.shares, reach: r.reach,
-        createdAt: r.created_at,
+      posts = dbData.map(r => ({
+        postId: r.post_id,
+        content: r.content,
+        likes: r.likes,
+        comments: r.comments,
+        shares: r.shares,
+        reach: r.reach,
+        createdTime: r.created_at,
       }));
     }
 
+    const totals = posts.reduce(
+      (acc, p) => {
+        acc.likes    += p.likes;
+        acc.comments += p.comments;
+        acc.shares   += p.shares;
+        acc.reach    += p.reach;
+        return acc;
+      },
+      { likes: 0, comments: 0, shares: 0, reach: 0 }
+    );
+
+    const totalEngagements = totals.likes + totals.comments + totals.shares;
+    const avgEngagementRate = totals.reach > 0
+      ? parseFloat(((totalEngagements / totals.reach) * 100).toFixed(2))
+      : 0;
+
     res.json({
+      success: true,
       clientId,
       clientName: client.name,
       platform: client.platform,
-      data: metaData,
+      source,
+      total: posts.length,
+      aggregates: { ...totals, totalEngagements, avgEngagementRate },
+      posts,
       lastUpdate: new Date().toISOString(),
     });
   } catch (err) {
     log('error', `Error fetching analytics for client ${clientId}: ${err.message}`);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
 
