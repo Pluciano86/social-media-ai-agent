@@ -1333,39 +1333,54 @@ app.get('/api/recommendations/:clientId', async (req, res) => {
 // ── GET /api/response-history/:clientId ─────────────────────────────────────
 app.get('/api/response-history/:clientId', async (req, res) => {
   const clientId = parseInt(req.params.clientId, 10);
-  if (isNaN(clientId)) return res.status(400).json({ error: 'Invalid clientId' });
+  if (isNaN(clientId)) {
+    return res.status(400).json({ success: false, message: 'clientId must be a number' });
+  }
 
-  const page  = Math.max(1, parseInt(req.query.page  || '1',  10));
-  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '20', 10)));
+  const page   = Math.max(1, parseInt(req.query.page  || '1',  10));
+  const limit  = Math.min(100, Math.max(1, parseInt(req.query.limit || '20', 10)));
   const offset = (page - 1) * limit;
 
   try {
     const { rows: clientRows } = await db.query('SELECT name FROM clients WHERE id = $1', [clientId]);
-    if (!clientRows.length) return res.status(404).json({ error: 'Client not found' });
+    if (clientRows.length === 0) {
+      return res.status(404).json({ success: false, message: `No client found with id ${clientId}` });
+    }
 
     const { rows: countRows } = await db.query(
-      'SELECT COUNT(*) AS total FROM comment_responses WHERE client_id = $1', [clientId]
+      'SELECT COUNT(*) AS total FROM comment_responses WHERE client_id = $1',
+      [clientId]
     );
     const total = parseInt(countRows[0].total, 10);
 
-    const { rows: responses } = await db.query(
-      `SELECT id, comment_id, original_comment, ai_response, post_id, created_at
+    const { rows } = await db.query(
+      `SELECT id, comment_id, original_comment, ai_response, post_id, platform, created_at
        FROM comment_responses WHERE client_id = $1
        ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
       [clientId, limit, offset]
     );
 
     res.json({
+      success: true,
       clientId,
       clientName: clientRows[0].name,
       total,
       page,
       limit,
-      responses,
+      totalPages: Math.ceil(total / limit),
+      responses: rows.map(r => ({
+        responseId: r.id,
+        commentId: r.comment_id,
+        originalComment: r.original_comment,
+        aiResponse: r.ai_response,
+        postId: r.post_id,
+        platform: r.platform,
+        createdAt: r.created_at,
+      })),
     });
   } catch (err) {
     log('error', `Error fetching response history for client ${clientId}: ${err.message}`);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
 
