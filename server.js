@@ -511,12 +511,30 @@ cron.schedule('* * * * *', async () => {
 // ─── ROUTES ──────────────────────────────────────────────────────────────────
 
 // Health Check
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
+app.get('/health', (req, res) => res.redirect(301, '/api/health'));
+
+app.get('/api/health', async (req, res) => {
+  let dbStatus = 'ok';
+  let dbLatencyMs = null;
+
+  try {
+    const t0 = Date.now();
+    await db.query('SELECT 1');
+    dbLatencyMs = Date.now() - t0;
+  } catch {
+    dbStatus = 'error';
+  }
+
+  const status = dbStatus === 'ok' ? 'ok' : 'degraded';
+
+  res.status(status === 'ok' ? 200 : 503).json({
+    status,
     timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
+    uptime: Math.floor(process.uptime()),
     environment: process.env.NODE_ENV || 'development',
+    services: {
+      database: { status: dbStatus, latencyMs: dbLatencyMs },
+    },
   });
 });
 
