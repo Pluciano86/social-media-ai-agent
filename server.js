@@ -1572,6 +1572,60 @@ app.post('/api/analyze-performance', async (req, res) => {
   }
 });
 
+// ── GET /api/analyze-performance/:clientId ──────────────────────────────────
+app.get('/api/analyze-performance/:clientId', async (req, res) => {
+  const clientId = parseInt(req.params.clientId, 10);
+  if (isNaN(clientId)) {
+    return res.status(400).json({ success: false, message: 'clientId must be a number' });
+  }
+
+  try {
+    const { rows: clientRows } = await db.query(
+      'SELECT id, name, platform FROM clients WHERE id = $1',
+      [clientId]
+    );
+    if (clientRows.length === 0) {
+      return res.status(404).json({ success: false, message: `No client found with id ${clientId}` });
+    }
+
+    const { rows } = await db.query(
+      `SELECT id, analysis_date, report_json, key_insights, recommendations, created_at
+       FROM performance_analyses
+       WHERE client_id = $1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [clientId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `No performance analysis found for client ${clientId}. Run POST /api/analyze-performance first.`,
+      });
+    }
+
+    const a = rows[0];
+    const report = a.report_json;
+
+    res.json({
+      success: true,
+      clientId,
+      clientName: clientRows[0].name,
+      platform: clientRows[0].platform,
+      analysisId: a.id,
+      analysisDate: a.analysis_date,
+      aggregateStats: report.aggregateStats || null,
+      analysis: report,
+      recommendations: a.recommendations,
+      keyInsights: a.key_insights,
+      createdAt: a.created_at,
+    });
+  } catch (err) {
+    log('error', `Error fetching performance analysis for client ${clientId}: ${err.message}`);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
 // 404 catch-all
 app.use((req, res) => {
   res.status(404).json({ error: `Route not found: ${req.method} ${req.path}` });
