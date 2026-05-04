@@ -977,6 +977,59 @@ app.post('/api/schedule-post', async (req, res) => {
   }
 });
 
+// ── GET /api/scheduled-posts/:clientId ─────────────────────────────────────
+app.get('/api/scheduled-posts/:clientId', async (req, res) => {
+  const clientId = parseInt(req.params.clientId, 10);
+  if (isNaN(clientId)) {
+    return res.status(400).json({ success: false, message: 'clientId must be a number' });
+  }
+
+  const { status } = req.query;
+  const validStatuses = ['pending', 'published', 'failed', 'cancelled'];
+  if (status && !validStatuses.includes(status)) {
+    return res.status(400).json({ success: false, message: `status must be one of: ${validStatuses.join(', ')}` });
+  }
+
+  try {
+    const { rows: clientRows } = await db.query('SELECT id FROM clients WHERE id = $1', [clientId]);
+    if (clientRows.length === 0) {
+      return res.status(404).json({ success: false, message: `No client found with id ${clientId}` });
+    }
+
+    const values = [clientId];
+    const filter = status ? ` AND status = $2` : '';
+    if (status) values.push(status);
+
+    const { rows } = await db.query(
+      `SELECT id, content, image_url, scheduled_time, platforms, status, published_at, error_message, created_at
+       FROM scheduled_posts
+       WHERE client_id = $1${filter}
+       ORDER BY scheduled_time ASC`,
+      values
+    );
+
+    res.json({
+      success: true,
+      clientId,
+      total: rows.length,
+      posts: rows.map(p => ({
+        postId: p.id,
+        content: p.content,
+        imageUrl: p.image_url,
+        scheduledTime: p.scheduled_time,
+        platforms: p.platforms,
+        status: p.status,
+        publishedAt: p.published_at,
+        errorMessage: p.error_message,
+        createdAt: p.created_at,
+      })),
+    });
+  } catch (err) {
+    log('error', `Error fetching scheduled posts for client ${clientId}: ${err.message}`);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
 // ── GET /api/analytics/:clientId ────────────────────────────────────────────
 app.get('/api/analytics/:clientId', async (req, res) => {
   const clientId = parseInt(req.params.clientId, 10);
