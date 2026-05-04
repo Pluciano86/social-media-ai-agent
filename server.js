@@ -763,6 +763,47 @@ app.put('/api/auth/change-password', requireAuth, async (req, res) => {
   }
 });
 
+// DELETE /api/auth/delete-account
+app.delete('/api/auth/delete-account', requireAuth, async (req, res) => {
+  const { password } = req.body;
+
+  const check = validateRequired(req.body, ['password']);
+  if (!check.valid) return res.status(400).json({ success: false, message: check.error });
+
+  try {
+    const { rows } = await db.query(
+      'SELECT id, username, password_hash FROM users WHERE id = $1',
+      [req.user.userId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const valid = await bcrypt.compare(password, rows[0].password_hash);
+    if (!valid) {
+      return res.status(401).json({ success: false, message: 'Password is incorrect' });
+    }
+
+    await db.query('DELETE FROM users WHERE id = $1', [req.user.userId]);
+
+    // Blacklist current token so it cannot be reused
+    if (req.user.jti) {
+      const expiresAt = new Date(req.user.exp * 1000);
+      await db.query(
+        'INSERT INTO token_blacklist (jti, expires_at) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [req.user.jti, expiresAt]
+      ).catch(err => log('warn', `Could not blacklist token after account deletion: ${err.message}`));
+    }
+
+    log('info', `Account deleted: ${rows[0].username} (id: ${req.user.userId})`);
+    res.json({ success: true, message: `Account "${rows[0].username}" deleted successfully` });
+  } catch (err) {
+    log('error', `Error deleting account: ${err.message}`);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
 // ────────────────────────────────────────────────────────────────────────────
 // All routes defined AFTER this point require a valid JWT
 app.use('/api', requireAuth);
