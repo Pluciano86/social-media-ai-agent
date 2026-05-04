@@ -961,39 +961,57 @@ app.post('/api/schedule-post', async (req, res) => {
   const check = validateRequired(req.body, ['clientId', 'content', 'scheduledTime']);
   if (!check.valid) return res.status(400).json({ success: false, message: check.error });
 
-  const scheduledDate = new Date(scheduledTime);
-  if (isNaN(scheduledDate.getTime())) {
-    return res.status(400).json({ success: false, message: 'Invalid scheduledTime format. Use ISO 8601.' });
+  const parsedClientId = parseInt(clientId, 10);
+  if (isNaN(parsedClientId)) {
+    return res.status(400).json({ success: false, message: 'clientId must be a number' });
   }
 
+  const scheduledDate = new Date(scheduledTime);
+  if (isNaN(scheduledDate.getTime())) {
+    return res.status(400).json({ success: false, message: 'scheduledTime must be a valid ISO 8601 date' });
+  }
   if (scheduledDate <= new Date()) {
     return res.status(400).json({ success: false, message: 'scheduledTime must be in the future' });
   }
 
   const platformList = Array.isArray(platforms) && platforms.length ? platforms : ['facebook'];
   const validPlatforms = ['facebook', 'instagram'];
-  const invalidPlatforms = platformList.filter(p => !validPlatforms.includes(p));
-  if (invalidPlatforms.length) {
-    return res.status(400).json({ success: false, message: `Invalid platforms: ${invalidPlatforms.join(', ')}` });
+  const invalid = platformList.filter(p => !validPlatforms.includes(p));
+  if (invalid.length) {
+    return res.status(400).json({ success: false, message: `Invalid platforms: ${invalid.join(', ')}. Must be facebook or instagram` });
   }
 
   try {
-    const { rows: clientRows } = await db.query('SELECT id FROM clients WHERE id = $1', [clientId]);
-    if (!clientRows.length) return res.status(404).json({ success: false, message: 'Client not found' });
+    const { rows: clientRows } = await db.query(
+      'SELECT id, name FROM clients WHERE id = $1',
+      [parsedClientId]
+    );
+    if (clientRows.length === 0) {
+      return res.status(404).json({ success: false, message: `No client found with id ${parsedClientId}` });
+    }
 
     const { rows } = await db.query(
       `INSERT INTO scheduled_posts (client_id, content, image_url, scheduled_time, platforms)
        VALUES ($1, $2, $3, $4, $5)
-       RETURNING id`,
-      [clientId, content, imageUrl || null, scheduledDate, platformList]
+       RETURNING id, content, image_url, scheduled_time, platforms, status, created_at`,
+      [parsedClientId, content, imageUrl || null, scheduledDate, platformList]
     );
 
-    log('info', `Post scheduled: id=${rows[0].id} for client=${clientId} at ${scheduledDate.toISOString()}`);
+    const p = rows[0];
+    log('info', `Post scheduled: id=${p.id} for client=${parsedClientId} at ${scheduledDate.toISOString()}`);
 
     res.status(201).json({
       success: true,
-      postId: rows[0].id,
-      message: `Post scheduled for ${scheduledDate.toISOString()} on [${platformList.join(', ')}]`,
+      message: 'Post scheduled successfully',
+      postId: p.id,
+      clientId: parsedClientId,
+      clientName: clientRows[0].name,
+      content: p.content,
+      imageUrl: p.image_url,
+      scheduledTime: p.scheduled_time,
+      platforms: p.platforms,
+      status: p.status,
+      createdAt: p.created_at,
     });
   } catch (err) {
     log('error', `Error scheduling post: ${err.message}`);
