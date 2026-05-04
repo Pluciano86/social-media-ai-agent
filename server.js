@@ -1030,6 +1030,46 @@ app.get('/api/scheduled-posts/:clientId', async (req, res) => {
   }
 });
 
+// ── DELETE /api/scheduled-posts/:postId ────────────────────────────────────
+app.delete('/api/scheduled-posts/:postId', async (req, res) => {
+  const postId = parseInt(req.params.postId, 10);
+  if (isNaN(postId)) {
+    return res.status(400).json({ success: false, message: 'postId must be a number' });
+  }
+
+  try {
+    const { rows } = await db.query(
+      `DELETE FROM scheduled_posts WHERE id = $1 AND status = 'pending'
+       RETURNING id, content, scheduled_time, status`,
+      [postId]
+    );
+
+    if (rows.length === 0) {
+      const { rows: existing } = await db.query(
+        'SELECT id, status FROM scheduled_posts WHERE id = $1',
+        [postId]
+      );
+      if (existing.length === 0) {
+        return res.status(404).json({ success: false, message: `No scheduled post found with id ${postId}` });
+      }
+      return res.status(409).json({
+        success: false,
+        message: `Post cannot be deleted because its status is "${existing[0].status}". Only pending posts can be deleted.`,
+      });
+    }
+
+    log('info', `Scheduled post deleted: id ${rows[0].id}`);
+    res.json({
+      success: true,
+      message: 'Scheduled post deleted successfully',
+      postId: rows[0].id,
+    });
+  } catch (err) {
+    log('error', `Error deleting scheduled post ${postId}: ${err.message}`);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
 // ── GET /api/analytics/:clientId ────────────────────────────────────────────
 app.get('/api/analytics/:clientId', async (req, res) => {
   const clientId = parseInt(req.params.clientId, 10);
