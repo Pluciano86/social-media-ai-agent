@@ -834,52 +834,66 @@ app.put('/api/clients/:clientId', async (req, res) => {
 // ── GET /api/comments/:clientId ─────────────────────────────────────────────
 app.get('/api/comments/:clientId', async (req, res) => {
   const clientId = parseInt(req.params.clientId, 10);
-  if (isNaN(clientId)) return res.status(400).json({ error: 'Invalid clientId' });
+  if (isNaN(clientId)) {
+    return res.status(400).json({ success: false, message: 'clientId must be a number' });
+  }
 
   try {
     const { rows: clientRows } = await db.query(
       'SELECT id, name, page_id, access_token FROM clients WHERE id = $1',
       [clientId]
     );
-    if (!clientRows.length) return res.status(404).json({ error: 'Client not found' });
+    if (clientRows.length === 0) {
+      return res.status(404).json({ success: false, message: `No client found with id ${clientId}` });
+    }
 
     const client = clientRows[0];
 
-    // Fetch responded comment IDs from DB
     const { rows: responded } = await db.query(
       'SELECT comment_id FROM comment_responses WHERE client_id = $1',
       [clientId]
     );
     const respondedIds = new Set(responded.map(r => r.comment_id));
 
-    let unansweredComments = [];
+    let comments = [];
+    let source = 'meta';
 
     try {
       const posts = await fetchPagePosts(client.page_id, client.access_token, 3);
       for (const post of posts) {
-        const comments = await fetchPostComments(post.id, client.access_token);
-        const unanswered = comments.filter(c => !respondedIds.has(c.id));
-        unansweredComments.push(...unanswered.map(c => ({
-          commentId: c.id,
-          postId: post.id,
-          message: c.message,
-          from: c.from?.name || 'Unknown',
-          createdAt: c.created_time,
-        })));
+        const postComments = await fetchPostComments(post.id, client.access_token);
+        for (const c of postComments) {
+          comments.push({
+            commentId: c.id,
+            postId: post.id,
+            message: c.message,
+            from: c.from?.name || 'Unknown',
+            answered: respondedIds.has(c.id),
+            createdAt: c.created_time,
+          });
+        }
       }
     } catch (err) {
       log('warn', `Error fetching comments from Meta for client ${clientId}: ${err.message}`);
+      source = 'unavailable';
     }
 
+    const unanswered = comments.filter(c => !c.answered);
+    const answered   = comments.filter(c => c.answered);
+
     res.json({
+      success: true,
       clientId,
       clientName: client.name,
-      totalUnanswered: unansweredComments.length,
-      comments: unansweredComments,
+      source,
+      total: comments.length,
+      totalUnanswered: unanswered.length,
+      totalAnswered: answered.length,
+      comments,
     });
   } catch (err) {
     log('error', `Error fetching comments for client ${clientId}: ${err.message}`);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
 
