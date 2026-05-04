@@ -777,6 +777,60 @@ app.get('/api/clients/:clientId', async (req, res) => {
   }
 });
 
+// ── PUT /api/clients/:clientId ──────────────────────────────────────────────
+app.put('/api/clients/:clientId', async (req, res) => {
+  const clientId = parseInt(req.params.clientId, 10);
+  if (isNaN(clientId)) {
+    return res.status(400).json({ success: false, message: 'clientId must be a number' });
+  }
+
+  const { clientName, platformType } = req.body;
+
+  if (!clientName && !platformType) {
+    return res.status(400).json({ success: false, message: 'Provide at least one field to update: clientName or platformType' });
+  }
+
+  const validPlatforms = ['facebook', 'instagram', 'both'];
+  if (platformType && !validPlatforms.includes(platformType)) {
+    return res.status(400).json({ success: false, message: `platformType must be one of: ${validPlatforms.join(', ')}` });
+  }
+
+  try {
+    const fields = [];
+    const values = [];
+    let idx = 1;
+
+    if (clientName)   { fields.push(`name = $${idx++}`);     values.push(clientName); }
+    if (platformType) { fields.push(`platform = $${idx++}`); values.push(platformType); }
+    values.push(clientId);
+
+    const { rows } = await db.query(
+      `UPDATE clients SET ${fields.join(', ')} WHERE id = $${idx}
+       RETURNING id, name, platform, page_id, created_at`,
+      values
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: `No client found with id ${clientId}` });
+    }
+
+    const c = rows[0];
+    log('info', `Client updated: ${c.name} (id: ${c.id})`);
+    res.json({
+      success: true,
+      message: 'Client updated successfully',
+      clientId: c.id,
+      clientName: c.name,
+      platform: c.platform,
+      pageId: c.page_id,
+      connectedAt: c.created_at,
+    });
+  } catch (err) {
+    log('error', `Error updating client ${clientId}: ${err.message}`);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
 // ── GET /api/comments/:clientId ─────────────────────────────────────────────
 app.get('/api/comments/:clientId', async (req, res) => {
   const clientId = parseInt(req.params.clientId, 10);
