@@ -904,12 +904,19 @@ app.post('/api/respond-comment', async (req, res) => {
   const check = validateRequired(req.body, ['clientId', 'commentId', 'commentText']);
   if (!check.valid) return res.status(400).json({ success: false, message: check.error });
 
+  const parsedClientId = parseInt(clientId, 10);
+  if (isNaN(parsedClientId)) {
+    return res.status(400).json({ success: false, message: 'clientId must be a number' });
+  }
+
   try {
     const { rows: clientRows } = await db.query(
       'SELECT id, name, page_id, access_token FROM clients WHERE id = $1',
-      [clientId]
+      [parsedClientId]
     );
-    if (!clientRows.length) return res.status(404).json({ success: false, message: 'Client not found' });
+    if (clientRows.length === 0) {
+      return res.status(404).json({ success: false, message: `No client found with id ${parsedClientId}` });
+    }
 
     const client = clientRows[0];
 
@@ -918,24 +925,27 @@ app.post('/api/respond-comment', async (req, res) => {
       return res.status(500).json({ success: false, message: 'AI failed to generate a response' });
     }
 
-    // Publish on Meta
+    let publishedToMeta = true;
     try {
       await postCommentReply(commentId, aiReply, client.access_token);
     } catch (err) {
+      publishedToMeta = false;
       log('warn', `Could not publish reply to Meta (${err.message}). Saving to DB only.`);
     }
 
-    // Save to DB (ignore duplicate)
     await db.query(
       `INSERT INTO comment_responses (client_id, comment_id, original_comment, ai_response)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (client_id, comment_id) DO UPDATE SET ai_response = EXCLUDED.ai_response`,
-      [clientId, commentId, commentText, aiReply]
+      [parsedClientId, commentId, commentText, aiReply]
     );
 
     res.json({
       success: true,
-      response: aiReply,
+      clientId: parsedClientId,
+      commentId,
+      aiResponse: aiReply,
+      publishedToMeta,
       generatedAt: new Date().toISOString(),
     });
   } catch (err) {
