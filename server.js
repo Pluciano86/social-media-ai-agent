@@ -1301,56 +1301,66 @@ app.get('/api/analytics/:clientId', async (req, res) => {
 // ── GET /api/recommendations/:clientId ──────────────────────────────────────
 app.get('/api/recommendations/:clientId', async (req, res) => {
   const clientId = parseInt(req.params.clientId, 10);
-  if (isNaN(clientId)) return res.status(400).json({ error: 'Invalid clientId' });
+  if (isNaN(clientId)) {
+    return res.status(400).json({ success: false, message: 'clientId must be a number' });
+  }
 
   try {
     const { rows: clientRows } = await db.query(
-      'SELECT id, name, platform FROM clients WHERE id = $1', [clientId]
+      'SELECT id, name, platform FROM clients WHERE id = $1',
+      [clientId]
     );
-    if (!clientRows.length) return res.status(404).json({ error: 'Client not found' });
+    if (clientRows.length === 0) {
+      return res.status(404).json({ success: false, message: `No client found with id ${clientId}` });
+    }
 
     const client = clientRows[0];
 
-    // Pull recent analytics from DB
-    const { rows: analyticsRows } = await db.query(
-      `SELECT post_id, likes, comments, shares, reach, created_at
-       FROM posts_analytics WHERE client_id = $1
-       ORDER BY created_at DESC LIMIT 20`,
-      [clientId]
-    );
+    const [{ rows: analyticsRows }, { rows: responseRows }, { rows: postRows }] = await Promise.all([
+      db.query(
+        `SELECT post_id, likes, comments, shares, reach, created_at
+         FROM posts_analytics WHERE client_id = $1 ORDER BY created_at DESC LIMIT 20`,
+        [clientId]
+      ),
+      db.query('SELECT COUNT(*) AS total FROM comment_responses WHERE client_id = $1', [clientId]),
+      db.query(
+        `SELECT status, COUNT(*) AS count FROM scheduled_posts WHERE client_id = $1 GROUP BY status`,
+        [clientId]
+      ),
+    ]);
 
-    // Pull response history stats
-    const { rows: responseRows } = await db.query(
-      'SELECT COUNT(*) AS total FROM comment_responses WHERE client_id = $1', [clientId]
-    );
+    const totalCommentReplies = parseInt(responseRows[0]?.total || 0);
 
-    // Pull scheduled posts stats
-    const { rows: postRows } = await db.query(
-      `SELECT status, COUNT(*) AS count FROM scheduled_posts WHERE client_id = $1 GROUP BY status`,
-      [clientId]
-    );
-
-    const historyData = {
-      client: { name: client.name, platform: client.platform },
-      analytics: analyticsRows,
-      totalCommentReplies: parseInt(responseRows[0]?.total || 0),
-      postStatusSummary: postRows,
-    };
-
-    if (!analyticsRows.length && !parseInt(responseRows[0]?.total)) {
+    if (analyticsRows.length === 0 && totalCommentReplies === 0) {
       return res.json({
+        success: true,
         clientId,
-        recommendations: 'No hay suficiente historial para generar recomendaciones. Conecta posts y responde comentarios primero.',
+        clientName: client.name,
+        insufficientData: true,
+        recommendations: 'No hay suficiente historial para generar recomendaciones. Publica posts y responde comentarios primero.',
       });
     }
 
     log('info', `Generating AI recommendations for client ${clientId}`);
-    const recommendations = await generateAnalyticsRecommendations(historyData);
+    const recommendations = await generateAnalyticsRecommendations({
+      client: { name: client.name, platform: client.platform },
+      analytics: analyticsRows,
+      totalCommentReplies,
+      postStatusSummary: postRows,
+    });
 
-    res.json({ clientId, recommendations });
+    res.json({
+      success: true,
+      clientId,
+      clientName: client.name,
+      platform: client.platform,
+      insufficientData: false,
+      recommendations,
+      generatedAt: new Date().toISOString(),
+    });
   } catch (err) {
     log('error', `Error generating recommendations for client ${clientId}: ${err.message}`);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
 
