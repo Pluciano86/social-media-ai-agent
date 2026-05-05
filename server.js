@@ -865,6 +865,110 @@ app.get('/api/analyze-performance-public/:clientId', async (req, res) => {
   }
 });
 
+// ── POST /api/analyze-performance-public/:clientId ──────────────────────────
+// Public mirror of POST /api/analyze-performance (no JWT required)
+app.post('/api/analyze-performance-public/:clientId', async (req, res) => {
+  const clientId = parseInt(req.params.clientId, 10);
+  if (isNaN(clientId)) {
+    return res.status(400).json({ success: false, message: 'clientId must be a number' });
+  }
+
+  log('info', `[ANALYZE-PUBLIC] Starting performance analysis for client ${clientId}`);
+
+  try {
+    const { rows: clientRows } = await db.query(
+      'SELECT id, name, platform, page_id, access_token FROM clients WHERE id = $1',
+      [clientId]
+    );
+    if (!clientRows.length) return res.status(404).json({ success: false, message: 'Client not found' });
+
+    const client = clientRows[0];
+    const DAYS_BACK = 60;
+
+    log('info', `[ANALYZE-PUBLIC] Fetching posts from last ${DAYS_BACK} days for ${client.name}...`);
+    let postsData = [];
+
+    try {
+      postsData = await fetchPostsWithMetrics(client.page_id, client.access_token, DAYS_BACK);
+      log('info', `[ANALYZE-PUBLIC] Retrieved ${postsData.length} posts with metrics`);
+    } catch (err) {
+      log('warn', `[ANALYZE-PUBLIC] Meta API error: ${err.message}. Falling back to DB data.`);
+
+      const { rows: dbPosts } = await db.query(
+        `SELECT post_id AS "postId", content AS message, likes, comments, shares, reach,
+                0 AS impressions, 'unknown' AS "contentType", created_at AS "createdTime",
+                EXTRACT(HOUR FROM created_at)::int AS hour,
+                TO_CHAR(created_at, 'Day') AS "dayOfWeek",
+                CASE WHEN reach > 0 THEN
+                  ROUND(((likes + comments + shares)::numeric / reach * 100), 2)
+                ELSE 0 END AS "engagementRate"
+         FROM posts_analytics WHERE client_id = $1
+         ORDER BY created_at DESC LIMIT 100`,
+        [clientId]
+      );
+      postsData = dbPosts;
+    }
+
+    if (!postsData.length) {
+      return res.status(422).json({
+        success: false,
+        message: 'No posts found for this client in the last 60 days. Publish some content first.',
+      });
+    }
+
+    const totalPosts       = postsData.length;
+    const totalLikes       = postsData.reduce((s, p) => s + (p.likes        || 0), 0);
+    const totalComments    = postsData.reduce((s, p) => s + (p.comments     || 0), 0);
+    const totalShares      = postsData.reduce((s, p) => s + (p.shares       || 0), 0);
+    const totalReach       = postsData.reduce((s, p) => s + (p.reach        || 0), 0);
+    const totalImpressions = postsData.reduce((s, p) => s + (p.impressions  || 0), 0);
+    const avgEngagement    = postsData.length
+      ? (postsData.reduce((s, p) => s + (p.engagementRate || 0), 0) / postsData.length).toFixed(2)
+      : '0.00';
+
+    const aggregateStats = {
+      totalPosts, totalLikes, totalComments, totalShares,
+      totalReach, totalImpressions, avgEngagementRate: parseFloat(avgEngagement),
+      period: `${DAYS_BACK} días`,
+      analysisDate: new Date().toISOString(),
+    };
+
+    log('info', `[ANALYZE-PUBLIC] Generating Claude AI report for ${client.name}...`);
+    const reportJson = await generatePerformanceReport(client.name, postsData, DAYS_BACK);
+
+    const keyInsights     = reportJson.keyInsights               || [];
+    const recommendations = reportJson.recomendacionesAlcance    || [];
+
+    await db.query(
+      `INSERT INTO performance_analyses
+         (client_id, analysis_date, report_json, key_insights, recommendations)
+       VALUES ($1, NOW(), $2, $3, $4)`,
+      [
+        clientId,
+        JSON.stringify({ aggregateStats, ...reportJson }),
+        JSON.stringify(keyInsights),
+        JSON.stringify(recommendations),
+      ]
+    );
+
+    log('info', `[ANALYZE-PUBLIC] ✅ Analysis complete for ${client.name}`);
+
+    res.json({
+      success:      true,
+      clientId,
+      clientName:   client.name,
+      analysisDate: new Date().toISOString(),
+      aggregateStats,
+      analysis:     reportJson,
+      recommendations,
+      keyInsights,
+    });
+  } catch (err) {
+    log('error', `[ANALYZE-PUBLIC] Error for client ${clientId}: ${err.message}`);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
 app.get('/health', (req, res) => res.redirect(301, '/api/health'));
 
 app.get('/api/health', async (req, res) => {
